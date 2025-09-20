@@ -6,8 +6,10 @@ use std::ops::Range;
 use std::io::*;
 
 const USAGE: &str = "USAGE:
-    symtool extract <path>
+    symtool extract [args] <path>
         Finds and prints all function symbols in passed directory or file.
+        
+        -h      Only use header files
         
     symtool addr <mapfile>
         For each piped line, find the address of that symbol given in the passed mapfile, then print the symbol and the address.
@@ -60,108 +62,34 @@ fn main() -> ExitCode {
 
 // Subcommands --------------------------------------------------------
 
-fn update(args: &[String]) -> ExitCode {
-    if args.is_empty() {
-        print!("{}", USAGE);
-        return ExitCode::FAILURE;
-    }
-    
-    let mapfile_path = Path::new(&args[0]);
-    let mut mapfile = match std::fs::read_to_string(mapfile_path) {
-        Ok(mapfile) => mapfile,
-        Err(e) => {
-            log_err!("Failed to read map file {}: {}", mapfile_path.display(), e);
-            return ExitCode::FAILURE;
-        }
-    };
-    
-    let mut updates = HashMap::<u32, String>::new();
-    let stdin = stdin().lock();
-    for line in stdin.lines() {
-        let Ok(line) = line else { continue };
-
-        if let Some(info) = line_symaddr(&line) {
-            updates.insert(info.addr, info.symbol.to_string());
-        }
-    }
-
-    if updates.is_empty() { return ExitCode::SUCCESS }
-
-    let mut i = mapfile.len();
-    while let Some((_, line)) = mapfile[..i].rsplit_once('\n') {
-        let line_start = i - line.len();
-
-        'check_line: {
-            let (addr, range) = match line_symaddr(line) {
-                Some(info) => (info.addr, info.symbol_range),
-                None => break 'check_line,
-            };
-            let Some(new_symbol) = updates.get(&addr) else { break 'check_line };
-            
-            let sym_range = (line_start+range.start)..(line_start+range.end);
-            println!("{} -> {}", &mapfile[sym_range.clone()], new_symbol);
-            mapfile.replace_range(sym_range, new_symbol);
-        }
-        
-        i = line_start;
-        if i != 0 { i -= 1; } else { break; }
-    }
-    
-    if let Err(e) = std::fs::write(mapfile_path, &mapfile) {
-        log_err!("Failed to write map file {}: {}", mapfile_path.display(), e);
-        return ExitCode::FAILURE;
-    }
-    
-    ExitCode::SUCCESS
-}
-
-fn addr(args: &[String]) -> ExitCode {
-    if args.is_empty() {
-        print!("{}", USAGE);
-        return ExitCode::FAILURE;
-    }
-    
-    let mapfile_path = Path::new(&args[0]);
-    let mapfile = match std::fs::read_to_string(mapfile_path) {
-        Ok(mapfile) => mapfile,
-        Err(e) => {
-            log_err!("Failed to read map file {}: {}", mapfile_path.display(), e);
-            return ExitCode::FAILURE;
-        }
-    };
-    
-    let mut maplookup = HashMap::<&str, u32>::new();
-    for line in mapfile.lines() {
-        if let Some(info) = line_symaddr(line) {
-            maplookup.insert(info.symbol, info.addr);
-        }
-    }
-    
-    // lookup symbols
-    let stdin = stdin().lock();
-    for line in stdin.lines() {
-        let Ok(line) = line else { continue };
-        let sym = line.trim();
-        if let Some(addr) = maplookup.get(sym) {
-            println!("{} {:08X}", sym, addr);
-        }
-    }
-    
-    ExitCode::SUCCESS
-}
-
 fn extract(args: &[String]) -> ExitCode {
     if args.is_empty() {
         print!("{}", USAGE);
         return ExitCode::FAILURE;
     }
     
-    let search_path = Path::new(&args[0]);
-    let paths = files_in_path(search_path);
+    let (search_path, args) = args.split_last().unwrap();
+    let paths = files_in_path(Path::new(search_path));
+    
+    let mut header_only = false;
+    for arg in args {
+        match arg.as_str() {
+            "-h" => header_only = true,
+            arg => log_err!("Unknown argument '{}'", arg),
+        }
+    }
+    
+    let extensions: &[&str] = if header_only { &["h"] } else { &["c", "h", "cc"] };
     
     for path in paths {
         let Some(ext) = path.extension() else { continue };
-        if ext != "c" && ext != "h" && ext != "cc" { continue }
+        
+        let mut ext_good = false;
+        for allowed_ext in extensions {
+            if ext == *allowed_ext { ext_good = true; break } 
+        }
+        
+        if !ext_good { continue }
 
         let src = match std::fs::read_to_string(&path) {
             Ok(s) => s,
@@ -216,6 +144,96 @@ fn extract(args: &[String]) -> ExitCode {
             // skip until next symbol, then try again
             take_while(src_iter, |c| !c.is_ascii_alphabetic() && c != '_');
         }
+    }
+    
+    ExitCode::SUCCESS
+}
+
+fn addr(args: &[String]) -> ExitCode {
+    if args.is_empty() {
+        print!("{}", USAGE);
+        return ExitCode::FAILURE;
+    }
+    
+    let mapfile_path = Path::new(&args[0]);
+    let mapfile = match std::fs::read_to_string(mapfile_path) {
+        Ok(mapfile) => mapfile,
+        Err(e) => {
+            log_err!("Failed to read map file {}: {}", mapfile_path.display(), e);
+            return ExitCode::FAILURE;
+        }
+    };
+    
+    let mut maplookup = HashMap::<&str, u32>::new();
+    for line in mapfile.lines() {
+        if let Some(info) = line_symaddr(line) {
+            maplookup.insert(info.symbol, info.addr);
+        }
+    }
+    
+    // lookup symbols
+    let stdin = stdin().lock();
+    for line in stdin.lines() {
+        let Ok(line) = line else { continue };
+        let sym = line.trim();
+        if let Some(addr) = maplookup.get(sym) {
+            println!("{} {:08X}", sym, addr);
+        }
+    }
+    
+    ExitCode::SUCCESS
+}
+
+fn update(args: &[String]) -> ExitCode {
+    if args.is_empty() {
+        print!("{}", USAGE);
+        return ExitCode::FAILURE;
+    }
+    
+    let mapfile_path = Path::new(&args[0]);
+    let mut mapfile = match std::fs::read_to_string(mapfile_path) {
+        Ok(mapfile) => mapfile,
+        Err(e) => {
+            log_err!("Failed to read map file {}: {}", mapfile_path.display(), e);
+            return ExitCode::FAILURE;
+        }
+    };
+    
+    let mut updates = HashMap::<u32, String>::new();
+    let stdin = stdin().lock();
+    for line in stdin.lines() {
+        let Ok(line) = line else { continue };
+
+        if let Some(info) = line_symaddr(&line) {
+            updates.insert(info.addr, info.symbol.to_string());
+        }
+    }
+
+    if updates.is_empty() { return ExitCode::SUCCESS }
+
+    let mut i = mapfile.len();
+    while let Some((_, line)) = mapfile[..i].rsplit_once('\n') {
+        let line_start = i - line.len();
+
+        'check_line: {
+            let (addr, range) = match line_symaddr(line) {
+                Some(info) => (info.addr, info.symbol_range),
+                None => break 'check_line,
+            };
+            let Some(new_symbol) = updates.get(&addr) else { break 'check_line };
+            
+            let sym_range = (line_start+range.start)..(line_start+range.end);
+            println!("{} -> {}", &mapfile[sym_range.clone()], new_symbol);
+            mapfile.replace_range(sym_range, new_symbol);
+        }
+        
+        i = line_start;
+        if i != 0 { i -= 1; } else { break; }
+    }
+    
+    if let Err(e) = std::fs::write(mapfile_path, &mapfile) {
+        log_err!("Failed to write map file {}: {}", mapfile_path.display(), e);
+        return ExitCode::FAILURE;
     }
     
     ExitCode::SUCCESS
