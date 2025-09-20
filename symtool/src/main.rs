@@ -201,7 +201,7 @@ fn extract(args: &[String]) -> ExitCode {
                 
                 let res = stdout.write_all(fn_name.as_bytes())
                     .and_then(|()| stdout.write_all(b"\n"));
-                
+
                 match res {
                     Err(e) if e.kind() == ErrorKind::BrokenPipe => return ExitCode::SUCCESS,
                     Err(e) => {
@@ -213,8 +213,8 @@ fn extract(args: &[String]) -> ExitCode {
                 }
             }
             
-            // skip until next whitespace, then try again
-            take_while(src_iter, |c| !c.is_ascii_whitespace());
+            // skip until next symbol, then try again
+            take_while(src_iter, |c| !c.is_ascii_alphabetic() && c != '_');
         }
     }
     
